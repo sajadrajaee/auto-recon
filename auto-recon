@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 
-# add a logger -> done
-# make tool does not output the result to terminal -> not done completely 
-# after file extension extractor is done, extract all important parameters. -> done
-# scan all extracted js files for paths and secrets, js files exists in ./ext/js.txt
-
-#MISSING SUB-STATUS.TXT FILE
+# to run this successfully on your machine, you need to have following tools installed : 
+# assetfinder, amass, findomain, subfinder, httpx, waybackurls, katana, jsleaks and 
+# a python script in /usr/bin/ext2 (this one extracts files from fetched urls, useful
+# for finding files like js,php,env,git,json,txt, and much more. I will upload the code as
+# a repo on github soon.
 
 set -euo pipefail
 IFS=$'\n\t'
