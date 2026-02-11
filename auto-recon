@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+
+# add a logger -> done
+# make tool does not output the result to terminal -> not done completely 
+# after file extension extractor is done, extract all important parameters. -> done
+# scan all extracted js files for paths and secrets, js files exists in ./ext/js.txt
+
+#MISSING SUB-STATUS.TXT FILE
+
+set -euo pipefail
+IFS=$'\n\t'
+
+LOGFILE="auto-recon.log"
+
+log(){ 
+    local d="[$(date '+%H:%M:%S')] "
+    printf $d
+}
+
+#  this func contains a list of some common parameters in 
+# urls, it will search through fetched urls and extract links
+# that has this parameters in use. you can add more if you 
+# want to.
+
+
+parext(){
+    local URLS=$1
+    local PARAMS=("id" "uid" "user" "username" "email" "name" "first_name" "last_name" "fullname" "q" "query" "search" "term" "s" "page" "pageid" "p" "pid" "item" "itemid" "productid" "sku" "category" "cat" "sub" "tag" "tags" "sort" "order" "orderby" "limit" "offset" "per_page" "perpage" "size" "view" "file" "filename" "filepath" "download" "dl" "attach" "attachment" "upload" "image" "img" "template" "tpl" "include" "path" "url" "dest" "destination" "redirect" "next" "return" "goto" "callback" "cb" "jsonp" "callback_url" "target" "host" "domain" "endpoint" "server" "port" "ip" "client_ip" "token" "access_token" "api_key" "key" "auth" "session" "sessid" "PHPSESSID" "JSESSIONID" "cookie" "csrf_token" "nonce" "signature" "sig" "hash" "debug" "test" "env" "mode" "admin" "is_admin" "role" "level" "privileged" "delete" "remove" "confirm" "confirm_yes" "cmd" "exec" "command" "do")
+    
+    OUTPUT="param.urls"
+    echo "\n\n # -------------------------------- Parameter extraction logs --------------------------------- #" >> $LOGFILE
+    echo "$(log) [+] started working on urls, parameter extraction started!" | tee -a $LOGFILE
+    for p in "${PARAMS[@]}";do
+        echo "$(log) [+] extracting parameter : $p" | tee -a $LOGFILE
+        cat $URLS | grep -E "\?$p=" >> $OUTPUT
+    done
+    if [[ -f $OUTPUT && -s $OUTPUT ]]; then echo "$(log) [+] parameters are extracted successfully." | tee -a $LOGFILE
+    else
+    	echo "$(log) something went wrong with parext result, check parameter extraction results manually." | tee -a $LOGFILE
+    fi
+    return 0 
+}
+
+# making use of waybackurls and katana for fetching urls and crawling website
+gatherurl() {
+    local sub_file="$1"
+    if [[ ! -f "$sub_file" ]]; then
+        echo "gatherurl: input file not found: $sub_file" >&2
+        return 1
+    fi
+
+    local wb="wayback.url"
+    local ku="katana.url"
+    local merged="urls.url"
+    local EXTRACT_CMD="ext2" 
+    # this is a python script, it searchs through gathered urls and
+    # write down important files in specifc directory. if you want to work with 
+    # this script, you need to locate the code in /usr/bin/ext2 file.
+
+
+
+    printf "\n\n #----------------------------- url gathering logs -------------------------------#\n" >> $LOGFILE
+    echo "$(log) [+] Gathering Wayback URLs for: $sub_file" | tee -a $LOGFILE
+    waybackurls < "$sub_file" > "$wb" || echo "$(log) [!] waybackurls returned non‑zero exit code" | tee -a $LOGFILE
+
+    if [[ -f $wb && -s $wb ]]; then
+        echo "$(log) [+] waybackurl is finished" | tee -a $LOGFILE
+        wbnum=$(cat $wb | wc -l)
+        echo "$(log) [+] number of gathered urls : $wbnum" | tee -a $LOGFILE
+    else
+        echo "$(log) [-] something went wrong went waybackurl" | tee -a $LOGFILE
+    fi
+    sleep 3
+    echo "$(log) [+] Gathering Katana URLs for: $sub_file" | tee -a $LOGFILE
+    cat $sub_file | katana -o $ku 
+    if [[ -f $ku && -s $ku ]]; then
+        printf "$(log) [+] katana is finished\n" | tee -a $LOGFILE
+        kunum=$(cat $ku | wc -l)
+        printf "$(log) [+] number of gathered urls : $kunum\n" | tee -a $LOGFILE
+    else
+        printf "$(log) [-] something went wrong with katana.\n	" | tee -a $LOGFILE
+    fi
+    
+    sort -u "$wb" "$ku" > "$merged"
+
+    echo "$(log) [+] Merged urls written to: $merged" | tee -a $LOGFILE
+    echo "$(log) [+] Running extractor on: $merged with: $EXTRACT_CMD" | tee -a $LOGFILE
+
+    # Check extractor existence
+    if ! command -v "$EXTRACT_CMD" >/dev/null 2>&1; then
+        echo "$(log) WARNING: extractor command '$EXTRACT_CMD' not found. Skipping extraction step." >&2 | tee -a $LOGFILE
+        return 0
+    else
+    	# running extractor
+	"$EXTRACT_CMD" "$merged" || echo "$(log) [!] extractor ($EXTRACT_CMD) returned non‑zero exit code" | tee -a $LOGFILE
+    fi
+    
+    # sensitive files extraction step done
+    # we need to work on parameter extraction
+    parext $merged
+    return 0
+}
+
+
+subStatus() {
+  local live_file="live-subs.txt"
+  local subs_file="$1"
+  local sub_status="sub-status.txt"
+  
+  printf "\n\n #----------------------- subdomain status check logs --------------------------------#\n" >> $LOGFILE
+  if [[ -z "$subs_file" ]]; then
+    echo "Usage: subStatus <subdomains-file>" >&2
+    return 2
+  fi
+  if [[ ! -f "$subs_file" ]]; then
+    echo "$(log) subStatus: file not found: $subs_file" >&2 | tee -a $LOGFILE
+    return 1
+  fi
+
+  	echo "$(log) [+] Probing subdomains for live hosts (httpx) from: $subs_file" | tee -a $LOGFILE
+  # httpx -l FILE writes to stdout; use -o to write file
+  httpx -l "$subs_file" -o "$live_file" -silent || echo "[!] httpx returned non‑zero exit code" | tee -a $LOGFILE
+
+  if [[ ! -s "$live_file" ]]; then
+    echo "$(log) [!] No live hosts found or httpx returned empty output: $live_file" >&2 | tee -a $LOGFILE
+    exit 0
+  else
+    n=$(wc -l $live_file)
+    echo "$(log) [+] number of live subodamins found : $n" | tee -a $LOGFILE
+    echo "$(log) [+] running httpx with status,title and tech detection turn on --> " | tee -a $LOGFILE
+    httpx --no-color -silent -sc -title -tech-detect -l $live_file -o "$sub_status"
+    gatherurl "$live_file"
+  fi
+
+  # don't delete original subs_file by default — keep evidence. If you want to remove it, do so explicitly.
+  
+}
+
+subd() {
+    local d="${1:-}"
+    if [[ -z "$d" ]]; then
+        printf "Usage: subd <domain>\n" >&2
+    return 2
+    fi
+
+    local SUB="subdomains.txt"
+    local ASSETS="assets.txt"
+    local AMASS="amass.txt"
+    local SUBF="subfinder.txt"
+    local FINDO="${d}.txt"
+
+
+	# truncate/ensure SUB exists
+    : > "$SUB"
+
+	# run discovery tools only if installed; write outputs to files
+	
+    echo " #------------------------- subdomains gathering logs ------------------------------ #" >> $LOGFILE	
+    if command -v assetfinder >/dev/null 2>&1; then
+        printf "$(log) [+] assetfinder started running ... \n" | tee -a $LOGFILE
+        assetfinder -subs-only "$d" | tee "$ASSETS" >/dev/null || true
+        if [[ -f $ASSETS && -s $ASSETS ]]
+        then
+            subcount=$(cat $ASSETS | wc -l)
+            printf "$(log) [>] assetfnder is finished\n" | tee -a $LOGFILE
+            printf "$(log) [>] number of assets found : %d\n" "$subcount" | tee -a $LOGFILE
+         fi
+    else
+        printf "$(log) [-] assetfinders not installed, skipping\n" >&2 | tee -a $LOGFILE
+    fi
+
+    if command -v amass >/dev/null 2>&1; then
+        printf "$(log) [+] amass started running... \n" | tee -a $LOGFILE
+        amass enum -d "$d" -o "$AMASS" -timeout 10 2>/dev/null || true
+        if [[ -f $AMASS && -s $AMASS ]]
+        then
+            subcount=$(cat $AMASS | wc -l)
+            printf "$(log) [>] amass is finished\n" | tee -a $LOGFILE
+            printf "$(log) [>] number of assets found : %d\n" "$subcount" | tee -a $LOGFILE
+         fi
+    else
+        printf "$(log) [-] amass not installed, skipping\n" >&2 | tee -a $LOGFILE
+    fi
+
+    if command -v subfinder >/dev/null 2>&1; then
+        printf "$(log) [+] subfinder started running ... \n" | tee -a $LOGFILE
+        subfinder -all -d "$d" -o "$SUBF" 2>/dev/null || true
+        if [[ -f $SUBF && -s $SUBF ]]
+        then
+            subcount=$(cat $SUBF | wc -l)
+            printf "$(log) [+] subfiner is finished\n" | tee -a $LOGFILE
+            printf "$(log) [+] number of subdomains found : %d\n" "$subcount" | tee -a $LOGFILE
+	else
+	    printf "$(log) [-] something went wrong, file missing or file is empty!\n" | tee -a $LOGFILE
+	    #return 2
+         fi
+    else
+        printf "$(log) [-] subfinder not installed, skipping\n" >&2 | tee -a $LOGFILE
+    fi
+
+    sleep 1
+    if command -v findomain >/dev/null 2>&1; then
+        printf "$(log) [+] findomain started running... \n" | tee -a $LOGFILE
+
+        findomain --target "$d" --output 2>/dev/null || true
+	if [[ -f $FINDO && -s $FINDO ]]
+        then
+            subcount=$(cat $FINDO | wc -l)
+            printf "$(log) [+] findomain is finished\n" | tee -a $LOGFILE
+            printf "$(log) [+] number of subdomain found : %d\n" "$subcount" | tee -a $LOGFILE
+        else
+            printf "$(log) [-] something went wrong with findomain, file empty or missing.\n" | tee -a $LOGFILE
+         fi
+    else
+        printf "$(log) [-] findomain not installed, skipping\n" >&2 | tee -a $LOGFILE
+    fi
+
+	# list of files to aggregate (no commas)
+    local files=("$ASSETS" "$AMASS" "$SUBF" "$FINDO")
+    local any_success=0
+
+    for F in "${files[@]}"; do
+        if [[ -f "$F" && -s "$F" ]]; then
+            any_success=1
+        # append unique lines from each source to SUB (avoids huge in-memory concatenation)
+            sort -u "$F" >> "$SUB"
+        else
+            printf "$(log) [-] %s missing or empty\n" "$F" >&2 | tee -a $LOGFILE
+        fi
+    done
+
+    if (( any_success == 0 )); then
+        printf "$(log) [-] no data collected from any source for %s\n" "$d" >&2 | tee -a $LOGFILE
+        return 3
+    fi
+
+    sort -u "$SUB" -o "$SUB"
+    local ns
+    ns=$(wc -l < "$SUB" | tr -d ' ')
+    printf "$(log) %s uniq subdomain(s) found\n" "$ns" | tee -a $LOGFILE
+
+    for F in "${files[@]}"; do
+        if [[ -f $F ]]; then
+            rm $F
+            printf "$(log) [+] removing $F\n"
+        else
+           echo "$(log) [-] $F not found to remove";
+        fi
+    done
+    subStatus $SUB
+    return 0
+}
+
+
+#function jsscan(){
+#    JSFILES="./ext/js.txt"
+#    SCANOUT="./ext/jsleaks.txt"
+
+#    echo "\n\n #---------------------------------- JS files scan logs -----------------------------------" >> $LOGFILE
+#    if [[ -f $JSFILES && -s $JSFILES ]]; then
+#        printf " [+] %s exist and has js files in it.\n" "$JSFILES" | tee -a $LOGFILE
+#    else
+#        printf " [-] %s is missing or has got no js files in it. exitting... \n" "$JSFILES" | tee -a $LOGFILE
+#        return 2 # 2 status code : missing keyword / no such file or directory
+#    fi
+#    echo " [+] js file scan is running : secretfinder and linkfinder status enabled!" | tee -a $LOGFILE
+#    cat $JSFILES | jsleak -s -l > $SCANOUT
+#    if [[ -f $SCANOUT && -s $SCANOUT ]]; then
+#        echo " [+] jsleak ran successfully" | tee -a $LOGFILE
+#       printf " [+] js leaks are stored in : %s\n" "$SCANOUT" | tee -a $LOGFILE
+ #       return 0
+#    fi
+
+
+#}
+subd "$1"
